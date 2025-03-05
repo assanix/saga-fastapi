@@ -65,6 +65,14 @@ class RabbitMQHandler:
             aio_pika.Message(body=event.model_dump_json().encode()),
             routing_key=routing_key
         )
+    
+    async def trigger_compensation(self, order_id: str):
+        compensation_event = SagaEvent(
+            order_id=order_id,
+            type='COMPENSATION_START',
+            payload={}
+        )
+        await self.publish_event('compensation.start', compensation_event)
 
     async def start_saga(self, payment_amount: float, product_id: str, quantity: int, shipping_address: str):
         saga = OrderSaga()
@@ -91,54 +99,66 @@ class RabbitMQHandler:
 
     async def process_payment_event(self, message: aio_pika.IncomingMessage):
         async with message.process():
-            event_data = json.loads(message.body.decode())
-            saga = await self.get_saga(event_data['order_id'])
-            if not saga:
-                return
+            try:
+                event_data = json.loads(message.body.decode())
+                saga = await self.get_saga(event_data['order_id'])
+                if not saga:
+                    return
 
-            saga.payment_status = SagaStatus.SUCCEEDED
-            await self.save_saga(saga)
+                saga.payment_status = SagaStatus.SUCCEEDED
+                await self.save_saga(saga)
 
-            inventory_event = SagaEvent(
-                order_id=saga.order_id,
-                type='INVENTORY_RESERVE',
-                payload={
-                    'product_id': event_data['payload']['product_id'],
-                    'quantity': event_data['payload']['quantity'],
-                    'shipping_address': event_data['payload']['shipping_address']
-                }
-            )
-            await self.publish_event('inventory.reserve', inventory_event)
+                inventory_event = SagaEvent(
+                    order_id=saga.order_id,
+                    type='INVENTORY_RESERVE',
+                    payload={
+                        'product_id': event_data['payload']['product_id'],
+                        'quantity': event_data['payload']['quantity'],
+                        'shipping_address': event_data['payload']['shipping_address']
+                    }
+                )
+                await self.publish_event('inventory.reserve', inventory_event)
+
+            except Exception:
+                await self.trigger_compensation(event_data['order_id'])
 
     async def process_inventory_event(self, message: aio_pika.IncomingMessage):
         async with message.process():
-            event_data = json.loads(message.body.decode())
-            saga = await self.get_saga(event_data['order_id'])
-            if not saga:
-                return
+            try:
+                event_data = json.loads(message.body.decode())
+                saga = await self.get_saga(event_data['order_id'])
+                if not saga:
+                    return
 
-            saga.inventory_status = SagaStatus.SUCCEEDED
-            await self.save_saga(saga)
+                saga.inventory_status = SagaStatus.SUCCEEDED
+                await self.save_saga(saga)
 
-            shipping_event = SagaEvent(
-                order_id=saga.order_id,
-                type='SHIPPING_CREATE',
-                payload={
-                    'shipping_address': event_data['payload']['shipping_address']
-                }
-            )
-            await self.publish_event('shipping.create', shipping_event)
+                shipping_event = SagaEvent(
+                    order_id=saga.order_id,
+                    type='SHIPPING_CREATE',
+                    payload={
+                        'shipping_address': event_data['payload']['shipping_address']
+                    }
+                )
+                await self.publish_event('shipping.create', shipping_event)
+
+            except Exception:
+                await self.trigger_compensation(event_data['order_id'])
 
     async def process_shipping_event(self, message: aio_pika.IncomingMessage):
         async with message.process():
-            event_data = json.loads(message.body.decode())
-            saga = await self.get_saga(event_data['order_id'])
-            if not saga:
-                return
+            try: 
+                event_data = json.loads(message.body.decode())
+                saga = await self.get_saga(event_data['order_id'])
+                if not saga:
+                    return
 
-            saga.shipping_status = SagaStatus.SUCCEEDED
-            saga.status = SagaStatus.SUCCEEDED
-            await self.save_saga(saga)
+                saga.shipping_status = SagaStatus.SUCCEEDED
+                saga.status = SagaStatus.SUCCEEDED
+                await self.save_saga(saga)
+
+            except Exception:
+                await self.trigger_compensation(event_data['order_id'])
 
     async def process_compensation_event(self, message: aio_pika.IncomingMessage):
         async with message.process():
